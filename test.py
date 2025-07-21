@@ -15,6 +15,7 @@ from core.vae_agent import VariationalAutoEncoder, init_and_load_model
 import torch
 from torchvision.utils import save_image
 
+from core.configs.values import DataInitialReturnNames as DRNames
 from core.utils.general import set_random_seed, root_path
 from core.configs.arguments import get_arguments, print_and_save_arguments
 from core.configs.logging_config import setup_ml_logging_and_mlflow
@@ -141,8 +142,12 @@ def run_evaluation():
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         print_and_save_arguments(args, save_dir=artifacts_dir)
 
-    conditioning_info, hybrid_dataloader, test_datasets, train_mixed, train_sampler, val_mixed, val_sampler, test_datasets\
-        = init_dataloader(args)
+    dataloader_kits = init_dataloader(args)
+    conditioning_info = dataloader_kits[DRNames.CONDITION_INFO.value]
+    hybrid_dataloader = dataloader_kits[DRNames.HYBRID_DATALOADER.value]
+    test_datasets = dataloader_kits[DRNames.TEST_DATASETS.value]
+    test_mixed = dataloader_kits[DRNames.TEST_MIXED.value]
+    test_sampler = dataloader_kits[DRNames.TEST_SAMPLER.value]
 
     # Initialize model
     img_shape = (conditioning_info['unified_channels'], args.image_size, args.image_size)
@@ -169,9 +174,14 @@ def run_evaluation():
         artifacts_dir=artifacts_dir
     )
 
-
     if args.create_visual_report:
-        pass # TODO adapt create_visual_report function with hybrid model.
+        core.generate_visual_report(
+            artifacts_dir=artifacts_dir,
+            dataset_info=conditioning_info,
+            data=test_mixed if test_mixed else None,
+            multi_loader=hybrid_dataloader,
+            test_datasets=test_datasets,
+        )
         # logger.info("Creating visual report for the model output...")
         # core.generate_visual_report(artifacts_dir=artifacts_dir, dataset_info=dataset_info, data=test_ds)
 

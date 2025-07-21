@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 
 from core.configs.arguments import get_arguments, print_and_save_arguments
 from core.configs.logging_config import setup_ml_logging_and_mlflow
-from core.configs.values import DataSplitType, VAEModelType
+from core.configs.values import DataInitialReturnNames as DRNames
 from core.data.hybrid_dataset import MultiDatasetLoader, collate_conditioned_samples, init_dataloader
 from core.utils.general import set_random_seed, root_path, symlink_force, apply_smoke_test_settings
 
@@ -161,8 +161,16 @@ def run_vae_experiment():
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         print_and_save_arguments(args, save_dir=artifacts_dir)
 
-    conditioning_info, hybrid_dataloader, test_datasets, train_mixed, train_sampler, val_mixed, val_sampler, test_datasets \
-        = init_dataloader(args)
+    dataloader_kits = init_dataloader(args)
+    conditioning_info = dataloader_kits[DRNames.CONDITION_INFO.value]
+    train_mixed = dataloader_kits[DRNames.TRAIN_MIXED.value]
+    train_sampler = dataloader_kits[DRNames.TRAIN_SAMPLER.value]
+    val_mixed = dataloader_kits[DRNames.VAL_MIXED.value]
+    val_sampler = dataloader_kits[DRNames.VAL_SAMPLER.value]
+    hybrid_dataloader = dataloader_kits[DRNames.HYBRID_DATALOADER.value]
+    test_datasets = dataloader_kits[DRNames.TEST_DATASETS.value]
+    test_mixed = dataloader_kits[DRNames.TEST_MIXED.value]
+    test_sampler = dataloader_kits[DRNames.TEST_SAMPLER.value]
 
     # Initialize model
     img_shape = (conditioning_info['unified_channels'], args.image_size, args.image_size)

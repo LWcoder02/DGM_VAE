@@ -98,3 +98,19 @@ class OSSURLType(TypeEnum):
     PRIVATE = "private"
     SIGNED = "signed_url"
     CKPT = "checkpoint_id"
+
+class DataInitialReturnNames(TypeEnum):
+    """
+    Enum for data initial return types.
+    """
+    CONDITION_INFO = "conditioning_info"
+    HYBRID_DATALOADER = "hybrid_dataloader"
+    TEST_MIXED = "test_mixed"
+    TEST_SAMPLER = "test_sampler"
+    TRAIN_MIXED = "train_mixed"
+    TRAIN_SAMPLER = "train_sampler"
+    VAL_MIXED = "val_mixed"
+    VAL_SAMPLER = "val_sampler"
+    TEST_DATASETS = "test_datasets"
+
+
