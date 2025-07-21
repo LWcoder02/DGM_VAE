@@ -1,4 +1,5 @@
 import logging
+import warnings
 from os import PathLike
 import torch
 import matplotlib.pyplot as plt
@@ -18,6 +19,12 @@ def generate_cvae_report(agent, artifacts_dir: PathLike = "cvae_report",
     Generate images for the CVAE mode report
 
     """
+    warnings.warn(
+        "generate_cvae_report is deprecated. Use generate_hybrid_cvae_report instead. Code here is only for "
+        "reference and will be removed in future versions.",
+        DeprecationWarning,
+        stacklevel=2
+    )
 
     artifacts_dir = Path(artifacts_dir)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -350,3 +357,577 @@ def wrap_class_name(class_name: str, wrap_width: int = 10) -> str:
         wrapped_lines = wrapped_lines[:2] + [wrapped_lines[2][:wrap_width - 3] + "..."]
 
     return '\n'.join(wrapped_lines)
+
+
+def generate_hybrid_cvae_report(
+        agent,
+        artifacts_dir: PathLike = "hybrid_cvae_report",
+        dataset_info: Optional[Dict[str, List]] = None,
+        multi_loader=None,
+        test_datasets: Optional[Dict[str, torch.utils.data.Dataset]] = None,
+):
+    # Multi-dataset conditional generation grid
+    generate_multi_dataset_samples_grid(
+        agent=agent,
+        multi_loader=multi_loader,
+        artifacts_dir=artifacts_dir,
+        samples_per_class=4
+    )
+
+    # Cross-dataset reconstruction comparison
+    if test_datasets:
+        generate_cross_dataset_reconstruction(
+            agent=agent,
+            test_datasets=test_datasets,
+            artifacts_dir=artifacts_dir,
+            n_samples=6
+        )
+
+        # Individual dataset analysis
+        for dataset_name, test_dataset in test_datasets.items():
+            generate_dataset_specific_analysis(
+                agent=agent,
+                dataset_name=dataset_name,
+                test_dataset=test_dataset,
+                multi_loader=multi_loader,
+                artifacts_dir=artifacts_dir
+            )
+
+    # Label type comparison
+    generate_label_type_comparison(
+        agent=agent,
+        multi_loader=multi_loader,
+        artifacts_dir=artifacts_dir
+    )
+
+    logger.info("Hybrid CVAE visual report generation completed.")
+
+
+def generate_multi_dataset_samples_grid(agent, multi_loader, artifacts_dir: PathLike,
+                                        samples_per_class: int = 4, fig_size: Tuple[int, int] = (15, 10)):
+    """
+    Generate a comprehensive grid showing samples from all datasets and their classes
+    Each major row represents a dataset, sub-rows represent classes within that dataset
+    """
+    if not agent.use_hybrid_conditioning:
+        logger.warning("Agent does not use hybrid conditioning. Skipping multi-dataset generation.")
+        return
+
+    artifacts_dir = Path(artifacts_dir)
+    all_samples = []
+    dataset_info_list = []
+
+    # Generate samples for each dataset
+    for dataset_id, dataset_name in enumerate(multi_loader.dataset_names):
+        dataset_info = multi_loader.datasets_info[dataset_name]
+        label_type_info = multi_loader.label_type_info[dataset_name]
+
+        dataset_samples = []
+        class_names = []
+
+        if label_type_info['type'] == 'single':
+            # Generate samples for each class in single-label dataset
+            n_classes = min(label_type_info['n_classes'], 8)  # Limit to 8 classes for visualization
+            for class_id in range(n_classes):
+                samples = agent.predict(
+                    num_samples=samples_per_class,
+                    dataset_id=dataset_id,
+                    dataset_name=dataset_name,
+                    label_type='single',
+                    labels=class_id
+                )
+                dataset_samples.append(samples)
+                class_names.append(dataset_info['info']['label'].get(str(class_id), f'Class {class_id}'))
+        else:
+            # For multi-label, generate samples with different label combinations
+            n_classes = label_type_info['n_classes']
+            # Generate samples for first few individual labels
+            for class_id in range(min(n_classes, 4)):
+                labels = torch.zeros(samples_per_class, n_classes)
+                labels[:, class_id] = 1.0
+                samples = agent.predict(
+                    num_samples=samples_per_class,
+                    dataset_id=dataset_id,
+                    dataset_name=dataset_name,
+                    label_type='multi',
+                    labels=labels
+                )
+                dataset_samples.append(samples)
+                class_names.append(f"Label {class_id}")
+
+        if dataset_samples:
+            dataset_samples_tensor = torch.cat(dataset_samples, dim=0)
+            all_samples.append(dataset_samples_tensor)
+            dataset_info_list.append({
+                'name': dataset_name,
+                'samples_shape': dataset_samples_tensor.shape,
+                'class_names': class_names,
+                'n_classes_shown': len(class_names)
+            })
+
+    if not all_samples:
+        logger.warning("No samples generated for multi-dataset grid")
+        return
+
+    # Create the visualization
+    fig, axes = plt.subplots(len(dataset_info_list), max(info['n_classes_shown'] for info in dataset_info_list),
+                             figsize=fig_size)
+
+    if len(dataset_info_list) == 1:
+        axes = axes.reshape(1, -1)
+
+    for dataset_idx, (samples, info) in enumerate(zip(all_samples, dataset_info_list)):
+        n_classes = info['n_classes_shown']
+
+        for class_idx in range(n_classes):
+            start_idx = class_idx * samples_per_class
+            end_idx = start_idx + samples_per_class
+            class_samples = samples[start_idx:end_idx]
+
+            # Create grid for this class
+            grid = make_grid(class_samples, nrow=samples_per_class, normalize=True, padding=1)
+            grid_np = grid.permute(1, 2, 0).cpu().numpy()
+
+            if grid_np.shape[2] == 1:
+                grid_np = grid_np.squeeze(2)
+                axes[dataset_idx, class_idx].imshow(grid_np, cmap='gray')
+            else:
+                axes[dataset_idx, class_idx].imshow(grid_np)
+
+            axes[dataset_idx, class_idx].axis('off')
+
+            # Add class label as title
+            if dataset_idx == 0:
+                wrapped_name = wrap_class_name(info['class_names'][class_idx], wrap_width=10)
+                axes[dataset_idx, class_idx].set_title(wrapped_name, fontsize=9, fontweight='bold')
+
+        # Hide unused subplots
+        max_classes = max(info['n_classes_shown'] for info in dataset_info_list)
+        for empty_idx in range(n_classes, max_classes):
+            axes[dataset_idx, empty_idx].axis('off')
+
+        # Add dataset name as row label
+        axes[dataset_idx, 0].text(-0.15, 0.5, info['name'], transform=axes[dataset_idx, 0].transAxes,
+                                  rotation=90, ha='center', va='center', fontsize=12, fontweight='bold')
+
+    plt.suptitle('Hybrid CVAE: Multi-Dataset Conditional Generation', fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    plt.subplots_adjust(left=0.1, top=0.9)
+
+    save_path = artifacts_dir / "hybrid_cvae_multi_dataset_samples"
+    plt.savefig(save_path.with_suffix(".png"), dpi=300, bbox_inches='tight')
+    plt.savefig(save_path.with_suffix(".pdf"), bbox_inches='tight')
+    plt.close()
+
+    logger.info(f"Multi-dataset samples grid saved to {save_path}")
+
+
+def generate_cross_dataset_reconstruction(agent, test_datasets: Dict, artifacts_dir: PathLike,
+                                          n_samples: int = 6, fig_size: Tuple[int, int] = (15, 8)):
+    """
+    Generate cross-dataset reconstruction comparison showing original vs reconstructed
+    images from multiple datasets in a unified view
+    """
+    artifacts_dir = Path(artifacts_dir)
+    agent._model.eval()
+    device = agent._device
+
+    # Collect samples from each dataset
+    dataset_comparisons = []
+    dataset_names = []
+
+    for dataset_name, test_dataset in test_datasets.items():
+        # Create a temporary dataloader for this dataset
+        from torch.utils.data import DataLoader
+        from core.data.hybrid_dataset import collate_conditioned_samples
+
+        temp_loader = DataLoader(test_dataset, batch_size=n_samples, shuffle=True,
+                                 collate_fn=collate_conditioned_samples)
+
+        # Get one batch
+        batch_data = next(iter(temp_loader))
+        images = batch_data['images'][:n_samples].to(device)
+
+        # ============ FIXED: Create properly sliced batch data for condition kwargs ============
+        # Slice all batch components to match the number of images
+        limited_batch_data = {
+            'images': batch_data['images'][:n_samples],
+            'dataset_ids': batch_data['dataset_ids'][:n_samples],
+            'dataset_names': batch_data['dataset_names'][:n_samples],
+            'label_types': batch_data['label_types'][:n_samples],
+            'single_mask': batch_data['single_mask'][:n_samples] if batch_data.get('single_mask') is not None else None,
+            'multi_mask': batch_data['multi_mask'][:n_samples] if batch_data.get('multi_mask') is not None else None,
+        }
+
+        # Handle labels based on masks
+        if limited_batch_data['single_mask'] is not None and limited_batch_data['single_mask'].any():
+            single_count = limited_batch_data['single_mask'].sum().item()
+            limited_batch_data['single_labels'] = batch_data['single_labels'][:single_count] if batch_data.get(
+                'single_labels') is not None else None
+        else:
+            limited_batch_data['single_labels'] = None
+
+        if limited_batch_data['multi_mask'] is not None and limited_batch_data['multi_mask'].any():
+            multi_count = limited_batch_data['multi_mask'].sum().item()
+            limited_batch_data['multi_labels'] = batch_data['multi_labels'][:multi_count] if batch_data.get(
+                'multi_labels') is not None else None
+        else:
+            limited_batch_data['multi_labels'] = None
+
+        # Generate reconstructions
+        with torch.no_grad():
+            condition_kwargs = agent._prepare_condition_kwargs(limited_batch_data)
+            reconstructed, _, _ = agent._model(images, **condition_kwargs)
+        # ============ END FIX ============
+
+        # Create comparison (original + reconstructed)
+        comparison = torch.cat([images, reconstructed], dim=0)
+        dataset_comparisons.append(comparison.cpu())
+        dataset_names.append(dataset_name)
+
+    if not dataset_comparisons:
+        logger.warning("No datasets available for cross-dataset reconstruction")
+        return
+
+    # Create visualization
+    n_datasets = len(dataset_comparisons)
+    fig, axes = plt.subplots(2 * n_datasets, n_samples, figsize=fig_size)
+
+    if n_datasets == 1:
+        axes = axes.reshape(2, -1)
+
+    for dataset_idx, (comparison, dataset_name) in enumerate(zip(dataset_comparisons, dataset_names)):
+        row_start = dataset_idx * 2
+
+        # Original images
+        for sample_idx in range(n_samples):
+            img = comparison[sample_idx].permute(1, 2, 0).numpy()
+            if img.shape[2] == 1:
+                img = img.squeeze(2)
+                axes[row_start, sample_idx].imshow(img, cmap='gray')
+            else:
+                axes[row_start, sample_idx].imshow(img)
+            axes[row_start, sample_idx].axis('off')
+
+            if sample_idx == 0:
+                axes[row_start, sample_idx].text(-0.1, 0.5, f'{dataset_name}\nOriginal',
+                                                 transform=axes[row_start, sample_idx].transAxes,
+                                                 rotation=0, ha='right', va='center',
+                                                 fontsize=10, fontweight='bold')
+
+        # Reconstructed images
+        for sample_idx in range(n_samples):
+            img = comparison[sample_idx + n_samples].permute(1, 2, 0).numpy()
+            if img.shape[2] == 1:
+                img = img.squeeze(2)
+                axes[row_start + 1, sample_idx].imshow(img, cmap='gray')
+            else:
+                axes[row_start + 1, sample_idx].imshow(img)
+            axes[row_start + 1, sample_idx].axis('off')
+
+            if sample_idx == 0:
+                axes[row_start + 1, sample_idx].text(-0.1, 0.5, 'Reconstructed',
+                                                     transform=axes[row_start + 1, sample_idx].transAxes,
+                                                     rotation=0, ha='right', va='center',
+                                                     fontsize=10, fontweight='bold')
+
+    plt.suptitle('Hybrid CVAE: Cross-Dataset Reconstruction Comparison', fontsize=16, fontweight='bold')
+    plt.tight_layout()
+    plt.subplots_adjust(left=0.15, top=0.9)
+
+    save_path = artifacts_dir / "hybrid_cvae_cross_dataset_reconstruction"
+    plt.savefig(save_path.with_suffix(".png"), dpi=300, bbox_inches='tight')
+    plt.savefig(save_path.with_suffix(".pdf"), bbox_inches='tight')
+    plt.close()
+
+    logger.info(f"Cross-dataset reconstruction comparison saved to {save_path}")
+
+
+def generate_dataset_specific_analysis(agent, dataset_name: str, test_dataset, multi_loader,
+                                       artifacts_dir: PathLike, n_samples: int = 8):
+    """
+    Generate detailed analysis for a specific dataset including:
+    - Sample generation for all classes
+    - Reconstruction quality analysis
+    - Label-specific performance
+    """
+    artifacts_dir = Path(artifacts_dir)
+    agent._model.eval()
+    device = agent._device
+
+    dataset_id = multi_loader.dataset_names.index(dataset_name)
+    label_type_info = multi_loader.label_type_info[dataset_name]
+    dataset_info = multi_loader.datasets_info[dataset_name]['info']
+
+    # Create figure with subplots
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    fig.suptitle(f'Dataset Analysis: {dataset_name}', fontsize=16, fontweight='bold')
+
+    # 1. Generated samples grid (top-left)
+    generated_samples = []
+    if label_type_info['type'] == 'single':
+        n_classes_to_show = min(label_type_info['n_classes'], 6)
+        for class_id in range(n_classes_to_show):
+            samples = agent.predict(
+                num_samples=4,
+                dataset_id=dataset_id,
+                dataset_name=dataset_name,
+                label_type='single',
+                labels=class_id
+            )
+            generated_samples.append(samples)
+    else:
+        # Multi-label: show different combinations
+        n_classes = label_type_info['n_classes']
+        for i in range(min(4, n_classes)):
+            labels = torch.zeros(4, n_classes)
+            labels[:, i] = 1.0
+            samples = agent.predict(
+                num_samples=4,
+                dataset_id=dataset_id,
+                dataset_name=dataset_name,
+                label_type='multi',
+                labels=labels
+            )
+            generated_samples.append(samples)
+
+    if generated_samples:
+        all_generated = torch.cat(generated_samples, dim=0)
+        grid = make_grid(all_generated, nrow=4, normalize=True, padding=2)
+        grid_np = grid.permute(1, 2, 0).cpu().numpy()
+
+        if grid_np.shape[2] == 1:
+            grid_np = grid_np.squeeze(2)
+            axes[0, 0].imshow(grid_np, cmap='gray')
+        else:
+            axes[0, 0].imshow(grid_np)
+        axes[0, 0].set_title('Generated Samples by Class')
+        axes[0, 0].axis('off')
+
+    # 2. Reconstruction comparison (top-right)
+    from torch.utils.data import DataLoader
+    from core.data.hybrid_dataset import collate_conditioned_samples
+
+    temp_loader = DataLoader(test_dataset, batch_size=4, shuffle=True,
+                             collate_fn=collate_conditioned_samples)
+    batch_data = next(iter(temp_loader))
+
+    images = batch_data['images'][:4].to(device)
+    with torch.no_grad():
+        # ============ FIXED: Create condition kwargs for the specific batch size ============
+        # Need to slice the batch_data to match the number of images we're using
+        limited_batch_data = {
+            'images': batch_data['images'][:4],
+            'dataset_ids': batch_data['dataset_ids'][:4],
+            'dataset_names': batch_data['dataset_names'][:4],
+            'label_types': batch_data['label_types'][:4],
+            'single_mask': batch_data['single_mask'][:4] if batch_data.get('single_mask') is not None else None,
+            'multi_mask': batch_data['multi_mask'][:4] if batch_data.get('multi_mask') is not None else None,
+        }
+
+        # Handle labels based on masks
+        if batch_data.get('single_labels') is not None and batch_data['single_mask'][:4].any():
+            single_count = batch_data['single_mask'][:4].sum().item()
+            limited_batch_data['single_labels'] = batch_data['single_labels'][:single_count]
+        else:
+            limited_batch_data['single_labels'] = None
+
+        if batch_data.get('multi_labels') is not None and batch_data['multi_mask'][:4].any():
+            multi_count = batch_data['multi_mask'][:4].sum().item()
+            limited_batch_data['multi_labels'] = batch_data['multi_labels'][:multi_count]
+        else:
+            limited_batch_data['multi_labels'] = None
+
+        condition_kwargs = agent._prepare_condition_kwargs(limited_batch_data)
+        reconstructed, _, _ = agent._model(images, **condition_kwargs)
+        # ============ END FIX ============
+
+    comparison = torch.cat([images, reconstructed], dim=0)
+    grid = make_grid(comparison, nrow=4, normalize=True, padding=2)
+    grid_np = grid.permute(1, 2, 0).cpu().numpy()
+
+    if grid_np.shape[2] == 1:
+        grid_np = grid_np.squeeze(2)
+        axes[0, 1].imshow(grid_np, cmap='gray')
+    else:
+        axes[0, 1].imshow(grid_np)
+    axes[0, 1].set_title('Reconstruction Comparison\n(Top: Original, Bottom: Reconstructed)')
+    axes[0, 1].axis('off')
+
+    # 3. Label distribution (bottom-left)
+    class_labels = list(dataset_info['label'].values())
+    class_counts = [1] * len(class_labels)  # Placeholder - in real scenario, count actual samples
+
+    axes[1, 0].bar(range(len(class_labels)), class_counts)
+    axes[1, 0].set_title('Class Distribution')
+    axes[1, 0].set_xlabel('Classes')
+    axes[1, 0].set_ylabel('Count')
+
+    # Wrap long labels
+    wrapped_labels = [wrap_class_name(label, wrap_width=8) for label in class_labels]
+    axes[1, 0].set_xticks(range(len(class_labels)))
+    axes[1, 0].set_xticklabels(wrapped_labels, rotation=45, ha='right', fontsize=8)
+
+    # 4. Dataset info (bottom-right)
+    info_text = f"""Dataset: {dataset_name}
+Task: {dataset_info.get('task', 'N/A')}
+Label Type: {label_type_info['type']}
+N Classes: {label_type_info['n_classes']}
+N Channels: {multi_loader.datasets_info[dataset_name]['n_channels']}
+Image Size: {multi_loader.image_size}x{multi_loader.image_size}"""
+
+    axes[1, 1].text(0.1, 0.5, info_text, transform=axes[1, 1].transAxes,
+                    fontsize=11, verticalalignment='center', fontfamily='monospace',
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.5))
+    axes[1, 1].axis('off')
+
+    plt.tight_layout()
+
+    save_path = artifacts_dir / f"hybrid_cvae_dataset_{dataset_name}_analysis"
+    plt.savefig(save_path.with_suffix(".png"), dpi=300, bbox_inches='tight')
+    plt.savefig(save_path.with_suffix(".pdf"), bbox_inches='tight')
+    plt.close()
+
+    logger.info(f"Dataset-specific analysis for {dataset_name} saved to {save_path}")
+
+
+def generate_label_type_comparison(agent, multi_loader, artifacts_dir: PathLike,
+                                   samples_per_type: int = 8, fig_size: Tuple[int, int] = (14, 8)):
+    """
+    Generate comparison between single-label and multi-label datasets
+    showing the differences in conditional generation
+    """
+    artifacts_dir = Path(artifacts_dir)
+
+    # Separate datasets by label type
+    single_label_datasets = []
+    multi_label_datasets = []
+
+    for dataset_name in multi_loader.dataset_names:
+        label_type = multi_loader.label_type_info[dataset_name]['type']
+        dataset_id = multi_loader.dataset_names.index(dataset_name)
+
+        if label_type == 'single':
+            single_label_datasets.append((dataset_id, dataset_name))
+        else:
+            multi_label_datasets.append((dataset_id, dataset_name))
+
+    if not single_label_datasets and not multi_label_datasets:
+        logger.warning("No datasets available for label type comparison")
+        return
+
+    fig, axes = plt.subplots(2, 2, figsize=fig_size)
+    fig.suptitle('Label Type Comparison: Single-Label vs Multi-Label', fontsize=16, fontweight='bold')
+
+    # Single-label samples (top row)
+    if single_label_datasets:
+        single_samples = []
+        single_names = []
+
+        for dataset_id, dataset_name in single_label_datasets[:2]:  # Limit to 2 datasets
+            n_classes = min(multi_loader.label_type_info[dataset_name]['n_classes'], 4)
+            for class_id in range(n_classes):
+                samples = agent.predict(
+                    num_samples=2,
+                    dataset_id=dataset_id,
+                    dataset_name=dataset_name,
+                    label_type='single',
+                    labels=class_id
+                )
+                single_samples.append(samples)
+            single_names.append(dataset_name)
+
+        if single_samples:
+            single_grid = make_grid(torch.cat(single_samples), nrow=8, normalize=True, padding=2)
+            single_grid_np = single_grid.permute(1, 2, 0).cpu().numpy()
+
+            if single_grid_np.shape[2] == 1:
+                single_grid_np = single_grid_np.squeeze(2)
+                axes[0, 0].imshow(single_grid_np, cmap='gray')
+            else:
+                axes[0, 0].imshow(single_grid_np)
+            axes[0, 0].set_title(f'Single-Label Datasets\n{", ".join(single_names)}')
+            axes[0, 0].axis('off')
+    else:
+        axes[0, 0].text(0.5, 0.5, 'No Single-Label\nDatasets', ha='center', va='center',
+                        transform=axes[0, 0].transAxes, fontsize=14)
+        axes[0, 0].axis('off')
+
+    # Multi-label samples (top right)
+    if multi_label_datasets:
+        multi_samples = []
+        multi_names = []
+
+        for dataset_id, dataset_name in multi_label_datasets[:2]:  # Limit to 2 datasets
+            n_classes = multi_loader.label_type_info[dataset_name]['n_classes']
+            # Generate samples with different label combinations
+            for i in range(min(4, n_classes)):
+                labels = torch.zeros(2, n_classes)
+                labels[:, i] = 1.0
+                samples = agent.predict(
+                    num_samples=2,
+                    dataset_id=dataset_id,
+                    dataset_name=dataset_name,
+                    label_type='multi',
+                    labels=labels
+                )
+                multi_samples.append(samples)
+            multi_names.append(dataset_name)
+
+        if multi_samples:
+            multi_grid = make_grid(torch.cat(multi_samples), nrow=8, normalize=True, padding=2)
+            multi_grid_np = multi_grid.permute(1, 2, 0).cpu().numpy()
+
+            if multi_grid_np.shape[2] == 1:
+                multi_grid_np = multi_grid_np.squeeze(2)
+                axes[0, 1].imshow(multi_grid_np, cmap='gray')
+            else:
+                axes[0, 1].imshow(multi_grid_np)
+            axes[0, 1].set_title(f'Multi-Label Datasets\n{", ".join(multi_names)}')
+            axes[0, 1].axis('off')
+    else:
+        axes[0, 1].text(0.5, 0.5, 'No Multi-Label\nDatasets', ha='center', va='center',
+                        transform=axes[0, 1].transAxes, fontsize=14)
+        axes[0, 1].axis('off')
+
+    # Statistics comparison (bottom row)
+    stats_text = "Label Type Statistics:\n\n"
+    stats_text += f"Single-Label Datasets: {len(single_label_datasets)}\n"
+    stats_text += f"Multi-Label Datasets: {len(multi_label_datasets)}\n\n"
+
+    if single_label_datasets:
+        avg_single_classes = np.mean([multi_loader.label_type_info[name]['n_classes']
+                                      for _, name in single_label_datasets])
+        stats_text += f"Avg Classes (Single): {avg_single_classes:.1f}\n"
+
+    if multi_label_datasets:
+        avg_multi_classes = np.mean([multi_loader.label_type_info[name]['n_classes']
+                                     for _, name in multi_label_datasets])
+        stats_text += f"Avg Classes (Multi): {avg_multi_classes:.1f}\n"
+
+    axes[1, 0].text(0.1, 0.5, stats_text, transform=axes[1, 0].transAxes,
+                    fontsize=12, verticalalignment='center', fontfamily='monospace',
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.3))
+    axes[1, 0].axis('off')
+
+    # Model architecture info
+    model_text = "Model Configuration:\n\n"
+    model_text += f"Hybrid Conditioning: {agent.use_hybrid_conditioning}\n"
+    model_text += f"Latent Dimension: {agent._model.latent_dim}\n"
+    model_text += f"Condition Dimension: {agent._model.condition_dim}\n"
+    model_text += f"Total Datasets: {multi_loader.num_datasets}\n"
+    model_text += f"Max Channels: {multi_loader.max_channels}\n"
+
+    axes[1, 1].text(0.1, 0.5, model_text, transform=axes[1, 1].transAxes,
+                    fontsize=12, verticalalignment='center', fontfamily='monospace',
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgreen", alpha=0.3))
+    axes[1, 1].axis('off')
+
+    plt.tight_layout()
+
+    save_path = artifacts_dir / "hybrid_cvae_label_type_comparison"
+    plt.savefig(save_path.with_suffix(".png"), dpi=300, bbox_inches='tight')
+    plt.savefig(save_path.with_suffix(".pdf"), bbox_inches='tight')
+    plt.close()
+
+    logger.info(f"Label type comparison saved to {save_path}")

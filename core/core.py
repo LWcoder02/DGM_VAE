@@ -88,8 +88,24 @@ class Core():
 
         return X_train, y_train, X_test, y_test
 
-    def generate_visual_report(self, artifacts_dir: PathLike = "outputs", dataset_info: Optional[Dict[str, Any]] = None,
-                               data=None):
+    def generate_visual_report(
+            self,
+            artifacts_dir: PathLike = "outputs",
+            dataset_info: Optional[Dict[str, Any]] = None,
+            data=None,
+            test_datasets=None,
+            multi_loader=None,
+            **kwargs
+    ):
+        """
+        Generate a visual report for the model's output.
+        :param artifacts_dir:
+        :param dataset_info:
+        :param data:
+        :param test_datasets: dictionary whose keys are dataset names and values are datasets
+        :param kwargs:
+        :return:
+        """
         if not isinstance(artifacts_dir, Path):
             artifacts_dir = Path(artifacts_dir)
         artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -97,10 +113,45 @@ class Core():
         agent = self._agent
         # Generate a report based on the model's output
         if agent.is_conditional_training:
+            if agent.use_hybrid_conditioning:
+                self._generate_hybrid_visual_report(
+                    artifacts_dir=artifacts_dir,
+                    multi_loader=multi_loader,
+                    test_datasets=test_datasets
+                )
+            else:
+                from core.visualization.visualize_model_output import generate_cvae_report
+
+                data_loader = DataLoader(data, batch_size=64, shuffle=True, num_workers=self._num_workers) if data else None
+                generate_cvae_report(agent, artifacts_dir=artifacts_dir, dataset_info=dataset_info, data_loader=data_loader)
+
+        else:
+            # For vanilla VAE, generate basic reconstruction report
             from core.visualization.visualize_model_output import generate_cvae_report
+            # TODO handle for vanilla VAE without conditioning
+            data_loader = None
+            if data is not None:
+                data_loader = DataLoader(data, batch_size=64, shuffle=True, num_workers=self._num_workers)
 
-            data_loader = DataLoader(data, batch_size=64, shuffle=True, num_workers=self._num_workers) if data else None
-            generate_cvae_report(agent, artifacts_dir=artifacts_dir, dataset_info=dataset_info, data_loader=data_loader)
+            # Use CVAE report but without conditional generation parts
+            generate_cvae_report(agent, artifacts_dir=artifacts_dir,
+                                 dataset_info=dataset_info, data_loader=data_loader)
 
-    def generate_hybrid_visual_report(self):
-        pass
+    def _generate_hybrid_visual_report(self, artifacts_dir: PathLike, **kwargs):
+        from core.visualization.visualize_model_output import generate_hybrid_cvae_report
+
+        multi_loader = kwargs.get('multi_loader')
+        test_datasets = kwargs.get('test_datasets')
+
+        if not multi_loader:
+            raise ValueError("multi_loader is required for hybrid visual report generation")
+
+        if not test_datasets:
+            raise ValueError("test_datasets is required for hybrid visual report generation")
+
+        generate_hybrid_cvae_report(
+            agent=self._agent,
+            multi_loader=multi_loader,
+            artifacts_dir=artifacts_dir,
+            test_datasets=test_datasets,
+        )

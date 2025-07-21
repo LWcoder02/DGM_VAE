@@ -7,7 +7,7 @@ from torchvision import transforms
 import torch.nn.functional as F
 
 from core.data.dataset import load_medmnist_data
-from core.configs.values import DataSplitType, DatasetLabelType, DatasetLabelInfoNames as DataLabelInfo
+from core.configs.values import DataSplitType, DatasetLabelType, DatasetLabelInfoNames as DataLabelInfo, DataInitialReturnNames as DRNames
 from core.utils.general import apply_smoke_test_settings
 
 logger = logging.getLogger(__name__)
@@ -249,9 +249,7 @@ class MultiDatasetLoader:
             'dataset_names': self.dataset_names,
             'unified_channels': self.max_channels,
             'datasets_info': self.datasets_info,
-            # ================== ENHANCED: Label type information ==================
             'label_type_info': self.label_type_info
-            # ================== END ENHANCEMENT ==================
         }
 
 
@@ -330,5 +328,14 @@ def init_dataloader(args):
             train_ds=train_mixed, val_ds=val_mixed, test_ds=test_mixed, args=args
         )
         train_sampler = val_sampler = None
-    return conditioning_info, hybrid_dataloader, test_datasets, train_mixed, train_sampler, val_mixed, val_sampler, test_datasets
-
+    return {
+        DRNames.CONDITION_INFO.value: conditioning_info,
+        DRNames.HYBRID_DATALOADER.value: hybrid_dataloader,
+        DRNames.TEST_DATASETS.value: test_datasets,
+        DRNames.TRAIN_MIXED.value: train_mixed,
+        DRNames.TRAIN_SAMPLER.value: train_sampler,
+        DRNames.VAL_MIXED.value: val_mixed,
+        DRNames.VAL_SAMPLER.value: val_sampler,
+        DRNames.TEST_MIXED.value: test_mixed,
+        DRNames.TEST_SAMPLER.value: test_sampler
+    }
