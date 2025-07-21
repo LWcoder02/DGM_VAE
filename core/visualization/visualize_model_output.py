@@ -374,51 +374,51 @@ def generate_hybrid_cvae_report(
         samples_per_class=4
     )
 
-    # Cross-dataset reconstruction comparison
-    if test_datasets:
-        generate_cross_dataset_reconstruction(
-            agent=agent,
-            test_datasets=test_datasets,
-            artifacts_dir=artifacts_dir,
-            n_samples=6
-        )
-
-        # Individual dataset analysis
-        for dataset_name, test_dataset in test_datasets.items():
-            generate_dataset_specific_analysis(
-                agent=agent,
-                dataset_name=dataset_name,
-                test_dataset=test_dataset,
-                multi_loader=multi_loader,
-                artifacts_dir=artifacts_dir
-            )
-
-    # Label type comparison
-    generate_label_type_comparison(
-        agent=agent,
-        multi_loader=multi_loader,
-        artifacts_dir=artifacts_dir
-    )
+    # # Cross-dataset reconstruction comparison
+    # if test_datasets:
+    #     generate_cross_dataset_reconstruction(
+    #         agent=agent,
+    #         test_datasets=test_datasets,
+    #         artifacts_dir=artifacts_dir,
+    #         n_samples=6
+    #     )
+    #
+    #     # Individual dataset analysis
+    #     for dataset_name, test_dataset in test_datasets.items():
+    #         generate_dataset_specific_analysis(
+    #             agent=agent,
+    #             dataset_name=dataset_name,
+    #             test_dataset=test_dataset,
+    #             multi_loader=multi_loader,
+    #             artifacts_dir=artifacts_dir
+    #         )
+    #
+    # # Label type comparison
+    # generate_label_type_comparison(
+    #     agent=agent,
+    #     multi_loader=multi_loader,
+    #     artifacts_dir=artifacts_dir
+    # )
 
     logger.info("Hybrid CVAE visual report generation completed.")
 
 
 def generate_multi_dataset_samples_grid(agent, multi_loader, artifacts_dir: PathLike,
-                                        samples_per_class: int = 4, fig_size: Tuple[int, int] = (15, 10)):
+                                        samples_per_class: int = 4, fig_size: Tuple[int, int] = (12, 8)):
     """
-    Generate a comprehensive grid showing samples from all datasets and their classes
-    Each major row represents a dataset, sub-rows represent classes within that dataset
+    Generate individual sample grids for each dataset
+    Layout: Each row represents one class, each column represents one sample of that class
     """
     if not agent.use_hybrid_conditioning:
         logger.warning("Agent does not use hybrid conditioning. Skipping multi-dataset generation.")
         return
 
     artifacts_dir = Path(artifacts_dir)
-    all_samples = []
-    dataset_info_list = []
 
-    # Generate samples for each dataset
+    # Generate samples for each dataset separately
     for dataset_id, dataset_name in enumerate(multi_loader.dataset_names):
+        logger.info(f"Generating samples grid for dataset: {dataset_name}")
+
         dataset_info = multi_loader.datasets_info[dataset_name]
         label_type_info = multi_loader.label_type_info[dataset_name]
 
@@ -442,7 +442,7 @@ def generate_multi_dataset_samples_grid(agent, multi_loader, artifacts_dir: Path
             # For multi-label, generate samples with different label combinations
             n_classes = label_type_info['n_classes']
             # Generate samples for first few individual labels
-            for class_id in range(min(n_classes, 4)):
+            for class_id in range(min(n_classes, 6)):  # Show more classes for multi-label
                 labels = torch.zeros(samples_per_class, n_classes)
                 labels[:, class_id] = 1.0
                 samples = agent.predict(
@@ -455,71 +455,164 @@ def generate_multi_dataset_samples_grid(agent, multi_loader, artifacts_dir: Path
                 dataset_samples.append(samples)
                 class_names.append(f"Label {class_id}")
 
-        if dataset_samples:
-            dataset_samples_tensor = torch.cat(dataset_samples, dim=0)
-            all_samples.append(dataset_samples_tensor)
-            dataset_info_list.append({
-                'name': dataset_name,
-                'samples_shape': dataset_samples_tensor.shape,
-                'class_names': class_names,
-                'n_classes_shown': len(class_names)
-            })
+        if not dataset_samples:
+            logger.warning(f"No samples generated for dataset {dataset_name}")
+            continue
 
-    if not all_samples:
-        logger.warning("No samples generated for multi-dataset grid")
-        return
+        n_classes_shown = len(class_names)
 
-    # Create the visualization
-    fig, axes = plt.subplots(len(dataset_info_list), max(info['n_classes_shown'] for info in dataset_info_list),
-                             figsize=fig_size)
+        # Create subplot grid: rows = classes, cols = samples + 1 (for label)
+        n_cols = samples_per_class + 1  # +1 for label column
+        n_rows = n_classes_shown
 
-    if len(dataset_info_list) == 1:
-        axes = axes.reshape(1, -1)
+        # Calculate optimal figure size
+        col_width = 1.0  # Width per sample column
+        row_height = 1.0  # Height per class row
+        label_col_width = 1.0  # Extra width for label column
 
-    for dataset_idx, (samples, info) in enumerate(zip(all_samples, dataset_info_list)):
-        n_classes = info['n_classes_shown']
+        fig_width = label_col_width + (samples_per_class * col_width)
+        fig_height = n_rows * row_height + 1.5  # +1.5 for title space
 
-        for class_idx in range(n_classes):
-            start_idx = class_idx * samples_per_class
-            end_idx = start_idx + samples_per_class
-            class_samples = samples[start_idx:end_idx]
+        fig, axes = plt.subplots(n_rows, n_cols,
+                                 figsize=(fig_width, fig_height),
+                                 gridspec_kw={'width_ratios': [1.0] + [1] * samples_per_class})
 
-            # Create grid for this class
-            grid = make_grid(class_samples, nrow=samples_per_class, normalize=True, padding=1)
-            grid_np = grid.permute(1, 2, 0).cpu().numpy()
+        # Handle single row case
+        if n_rows == 1:
+            axes = axes.reshape(1, -1)
 
-            if grid_np.shape[2] == 1:
-                grid_np = grid_np.squeeze(2)
-                axes[dataset_idx, class_idx].imshow(grid_np, cmap='gray')
-            else:
-                axes[dataset_idx, class_idx].imshow(grid_np)
+        # Plot each class and its samples
+        for class_idx, (class_samples, class_name) in enumerate(zip(dataset_samples, class_names)):
 
-            axes[dataset_idx, class_idx].axis('off')
+            # First column: Class label
+            axes[class_idx, 0].text(0.1, 0.5, wrap_class_name(class_name, wrap_width=15),
+                                    ha='center', va='center', fontsize=11, fontweight='bold',
+                                    transform=axes[class_idx, 0].transAxes)
+            axes[class_idx, 0].axis('off')
 
-            # Add class label as title
-            if dataset_idx == 0:
-                wrapped_name = wrap_class_name(info['class_names'][class_idx], wrap_width=10)
-                axes[dataset_idx, class_idx].set_title(wrapped_name, fontsize=9, fontweight='bold')
+            # Remaining columns: Individual samples
+            for sample_idx in range(samples_per_class):
+                sample = class_samples[sample_idx]
 
-        # Hide unused subplots
-        max_classes = max(info['n_classes_shown'] for info in dataset_info_list)
-        for empty_idx in range(n_classes, max_classes):
-            axes[dataset_idx, empty_idx].axis('off')
+                # Convert tensor to numpy for display
+                if sample.dim() == 3:  # [C, H, W]
+                    sample_np = sample.permute(1, 2, 0).cpu().numpy()
+                else:  # Handle other formats
+                    sample_np = sample.cpu().numpy()
 
-        # Add dataset name as row label
-        axes[dataset_idx, 0].text(-0.15, 0.5, info['name'], transform=axes[dataset_idx, 0].transAxes,
-                                  rotation=90, ha='center', va='center', fontsize=12, fontweight='bold')
+                # Display sample
+                if sample_np.shape[-1] == 1 or len(sample_np.shape) == 2:  # Grayscale
+                    if len(sample_np.shape) == 3:
+                        sample_np = sample_np.squeeze(-1)
+                    axes[class_idx, sample_idx + 1].imshow(sample_np, cmap='gray')
+                else:  # RGB
+                    axes[class_idx, sample_idx + 1].imshow(sample_np)
 
-    plt.suptitle('Hybrid CVAE: Multi-Dataset Conditional Generation', fontsize=16, fontweight='bold')
-    plt.tight_layout()
-    plt.subplots_adjust(left=0.1, top=0.9)
+                axes[class_idx, sample_idx + 1].axis('off')
 
-    save_path = artifacts_dir / "hybrid_cvae_multi_dataset_samples"
+                # Add sample number as title for first row only
+                if class_idx == 0:
+                    axes[class_idx, sample_idx + 1].set_title(f'Sample {sample_idx + 1}',
+                                                              fontsize=10, fontweight='bold')
+
+        # Set main title
+        label_type_str = label_type_info['type'].title()
+        n_total_classes = label_type_info['n_classes']
+
+        plt.suptitle(f'Dataset: {dataset_name}\n'
+                     f'Type: {label_type_str}-Label | Classes: {n_total_classes} | '
+                     f'Showing: {n_classes_shown} classes',
+                     fontsize=14, fontweight='bold')
+
+        # Adjust spacing
+        plt.tight_layout()
+        plt.subplots_adjust(
+            top=0.90,  # Space for main title
+            bottom=0.02,  # Minimal bottom margin
+            left=0.05,  # Minimal left margin
+            right=0.98,  # Minimal right margin
+            hspace=0.1,  # Minimal vertical spacing between rows
+            wspace=0.05  # Minimal horizontal spacing between columns
+        )
+        # ============ END NEW IMPLEMENTATION ============
+
+        # Save individual dataset figure
+        save_path = artifacts_dir / f"hybrid_cvae_samples_{dataset_name}"
+        plt.savefig(save_path.with_suffix(".png"), dpi=300, bbox_inches='tight')
+        plt.savefig(save_path.with_suffix(".pdf"), bbox_inches='tight')
+        plt.close()
+
+        logger.info(f"Sample grid for {dataset_name} saved to {save_path}")
+
+    # Create a summary overview figure showing one example from each dataset
+    _generate_dataset_overview(agent, multi_loader, artifacts_dir, samples_per_class)
+
+
+def _generate_dataset_overview(agent, multi_loader, artifacts_dir: PathLike, samples_per_class: int = 4):
+    """
+    Generate a summary overview showing representative samples from each dataset
+    """
+
+    fig, axes = plt.subplots(1, len(multi_loader.dataset_names), figsize=(15, 3))
+
+    if len(multi_loader.dataset_names) == 1:
+        axes = [axes]
+
+    for dataset_idx, dataset_name in enumerate(multi_loader.dataset_names):
+        label_type_info = multi_loader.label_type_info[dataset_name]
+
+        # Generate a few samples from the first class/label
+        if label_type_info['type'] == 'single':
+            samples = agent.predict(
+                num_samples=samples_per_class,
+                dataset_id=dataset_idx,
+                dataset_name=dataset_name,
+                label_type='single',
+                labels=0
+            )
+        else:
+            n_classes = label_type_info['n_classes']
+            labels = torch.zeros(samples_per_class, n_classes)
+            labels[:, 0] = 1.0
+            samples = agent.predict(
+                num_samples=samples_per_class,
+                dataset_id=dataset_idx,
+                dataset_name=dataset_name,
+                label_type='multi',
+                labels=labels
+            )
+
+        # Create grid
+        grid = make_grid(samples, nrow=samples_per_class, normalize=True, padding=2)
+        grid_np = grid.permute(1, 2, 0).cpu().numpy()
+
+        if grid_np.shape[2] == 1:
+            grid_np = grid_np.squeeze(2)
+            axes[dataset_idx].imshow(grid_np, cmap='gray')
+        else:
+            axes[dataset_idx].imshow(grid_np)
+
+        axes[dataset_idx].axis('off')
+        axes[dataset_idx].set_title(f'{dataset_name}\n({label_type_info["type"]}-label)',
+                                    fontsize=12, fontweight='bold')
+
+    plt.suptitle('Hybrid CVAE: Dataset Overview', fontsize=16, fontweight='bold')
+    plt.tight_layout(pad=1.5)  # Reduced padding
+    plt.subplots_adjust(
+        top=0.85,  # Space for title
+        bottom=0.05,  # Minimal bottom margin
+        left=0.05,  # Minimal left margin
+        right=0.95,  # Minimal right margin
+        hspace=0.3,  # Reduced vertical spacing between rows
+        wspace=0.2  # Reduced horizontal spacing between columns
+    )
+
+    save_path = artifacts_dir / "hybrid_cvae_dataset_overview"
     plt.savefig(save_path.with_suffix(".png"), dpi=300, bbox_inches='tight')
     plt.savefig(save_path.with_suffix(".pdf"), bbox_inches='tight')
     plt.close()
 
-    logger.info(f"Multi-dataset samples grid saved to {save_path}")
+    logger.info(f"Dataset overview saved to {save_path}")
 
 
 def generate_cross_dataset_reconstruction(agent, test_datasets: Dict, artifacts_dir: PathLike,
