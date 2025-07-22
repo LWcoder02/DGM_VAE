@@ -165,6 +165,7 @@ def run_evaluation():
 
     core = Core(agent=agent, optimizer=None, loss_function=None, num_workers=args.num_workers)
 
+    # TODO uncomment the following line to enable test reconstruction and sample generation
     generate_hybrid_samples_and_reconstruct(
         agent=agent,
         core=core,

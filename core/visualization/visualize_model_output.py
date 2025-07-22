@@ -374,31 +374,41 @@ def generate_hybrid_cvae_report(
         samples_per_class=4
     )
 
-    # # Cross-dataset reconstruction comparison
-    # if test_datasets:
-    #     generate_cross_dataset_reconstruction(
-    #         agent=agent,
-    #         test_datasets=test_datasets,
-    #         artifacts_dir=artifacts_dir,
-    #         n_samples=6
-    #     )
-    #
-    #     # Individual dataset analysis
-    #     for dataset_name, test_dataset in test_datasets.items():
-    #         generate_dataset_specific_analysis(
-    #             agent=agent,
-    #             dataset_name=dataset_name,
-    #             test_dataset=test_dataset,
-    #             multi_loader=multi_loader,
-    #             artifacts_dir=artifacts_dir
-    #         )
-    #
-    # # Label type comparison
-    # generate_label_type_comparison(
-    #     agent=agent,
-    #     multi_loader=multi_loader,
-    #     artifacts_dir=artifacts_dir
-    # )
+    # Cross-dataset reconstruction comparison
+    if test_datasets:
+        generate_cross_dataset_reconstruction(
+            agent=agent,
+            test_datasets=test_datasets,
+            artifacts_dir=artifacts_dir,
+            n_samples=6
+        )
+
+        # Individual dataset analysis
+        for dataset_name, test_dataset in test_datasets.items():
+            generate_dataset_specific_analysis(
+                agent=agent,
+                dataset_name=dataset_name,
+                test_dataset=test_dataset,
+                multi_loader=multi_loader,
+                artifacts_dir=artifacts_dir
+            )
+
+
+    # Label type comparison
+    generate_label_type_comparison(
+        agent=agent,
+        multi_loader=multi_loader,
+        artifacts_dir=artifacts_dir
+    )
+
+    generate_latent_space_analysis(
+        agent=agent,
+        multi_loader=multi_loader,
+        artifacts_dir=artifacts_dir,
+        test_datasets=test_datasets,
+        n_samples=100,
+        fig_size=(12, 8)
+    )
 
     logger.info("Hybrid CVAE visual report generation completed.")
 
@@ -641,7 +651,6 @@ def generate_cross_dataset_reconstruction(agent, test_datasets: Dict, artifacts_
         batch_data = next(iter(temp_loader))
         images = batch_data['images'][:n_samples].to(device)
 
-        # ============ FIXED: Create properly sliced batch data for condition kwargs ============
         # Slice all batch components to match the number of images
         limited_batch_data = {
             'images': batch_data['images'][:n_samples],
@@ -671,7 +680,6 @@ def generate_cross_dataset_reconstruction(agent, test_datasets: Dict, artifacts_
         with torch.no_grad():
             condition_kwargs = agent._prepare_condition_kwargs(limited_batch_data)
             reconstructed, _, _ = agent._model(images, **condition_kwargs)
-        # ============ END FIX ============
 
         # Create comparison (original + reconstructed)
         comparison = torch.cat([images, reconstructed], dim=0)
@@ -807,7 +815,6 @@ def generate_dataset_specific_analysis(agent, dataset_name: str, test_dataset, m
 
     images = batch_data['images'][:4].to(device)
     with torch.no_grad():
-        # ============ FIXED: Create condition kwargs for the specific batch size ============
         # Need to slice the batch_data to match the number of images we're using
         limited_batch_data = {
             'images': batch_data['images'][:4],
@@ -833,7 +840,6 @@ def generate_dataset_specific_analysis(agent, dataset_name: str, test_dataset, m
 
         condition_kwargs = agent._prepare_condition_kwargs(limited_batch_data)
         reconstructed, _, _ = agent._model(images, **condition_kwargs)
-        # ============ END FIX ============
 
     comparison = torch.cat([images, reconstructed], dim=0)
     grid = make_grid(comparison, nrow=4, normalize=True, padding=2)
@@ -1024,3 +1030,379 @@ def generate_label_type_comparison(agent, multi_loader, artifacts_dir: PathLike,
     plt.close()
 
     logger.info(f"Label type comparison saved to {save_path}")
+
+
+def generate_latent_space_analysis(agent, multi_loader, test_datasets: Dict, artifacts_dir: PathLike,
+                                   n_samples: int = 500, fig_size: Tuple[int, int] = (15, 10)):
+    """
+    Generate comprehensive latent space analysis including:
+    - t-SNE visualization of latent representations
+    - Latent space interpolation
+    - Latent dimension importance analysis
+    """
+    artifacts_dir = Path(artifacts_dir)
+    agent._model.eval()
+    device = agent._device
+
+    logger.info("Generating latent space analysis...")
+
+    # Collect latent representations from all datasets
+    all_latents = []
+    all_labels = []
+    all_dataset_ids = []
+    all_dataset_names = []
+
+    from torch.utils.data import DataLoader
+    from core.data.hybrid_dataset import collate_conditioned_samples
+
+    for dataset_name, test_dataset in test_datasets.items():
+        dataset_id = multi_loader.dataset_names.index(dataset_name)
+        temp_loader = DataLoader(test_dataset, batch_size=32, shuffle=True,
+                                 collate_fn=collate_conditioned_samples)
+
+        dataset_latents = []
+        dataset_labels = []
+        samples_collected = 0
+
+        with torch.no_grad():
+            for batch_data in temp_loader:
+                if samples_collected >= n_samples // len(test_datasets):
+                    break
+
+                images = batch_data['images'].to(device)
+                batch_size = images.shape[0]
+
+                # Prepare condition kwargs
+                limited_batch_data = {
+                    'images': batch_data['images'][:batch_size],
+                    'dataset_ids': batch_data['dataset_ids'][:batch_size],
+                    'dataset_names': batch_data['dataset_names'][:batch_size],
+                    'label_types': batch_data['label_types'][:batch_size],
+                    'single_mask': batch_data['single_mask'][:batch_size] if batch_data.get(
+                        'single_mask') is not None else None,
+                    'multi_mask': batch_data['multi_mask'][:batch_size] if batch_data.get(
+                        'multi_mask') is not None else None,
+                }
+
+                # Handle labels
+                if limited_batch_data['single_mask'] is not None and limited_batch_data['single_mask'].any():
+                    single_count = limited_batch_data['single_mask'].sum().item()
+                    limited_batch_data['single_labels'] = batch_data['single_labels'][:single_count] if batch_data.get(
+                        'single_labels') is not None else None
+                else:
+                    limited_batch_data['single_labels'] = None
+
+                if limited_batch_data['multi_mask'] is not None and limited_batch_data['multi_mask'].any():
+                    multi_count = limited_batch_data['multi_mask'].sum().item()
+                    limited_batch_data['multi_labels'] = batch_data['multi_labels'][:multi_count] if batch_data.get(
+                        'multi_labels') is not None else None
+                else:
+                    limited_batch_data['multi_labels'] = None
+
+                condition_kwargs = agent._prepare_condition_kwargs(limited_batch_data)
+
+                # Encode to latent space
+                mu, logvar = agent._model.encode(images, **condition_kwargs)
+
+                dataset_latents.append(mu.cpu())
+
+                # Extract labels for visualization
+                if batch_data.get('single_labels') is not None:
+                    dataset_labels.extend(batch_data['single_labels'][:batch_size].cpu().numpy())
+                else:
+                    dataset_labels.extend([0] * batch_size)  # Default label
+
+                samples_collected += batch_size
+
+        if dataset_latents:
+            all_latents.append(torch.cat(dataset_latents, dim=0))
+            all_labels.extend(dataset_labels)
+            all_dataset_ids.extend([dataset_id] * len(dataset_labels))
+            all_dataset_names.extend([dataset_name] * len(dataset_labels))
+
+    if not all_latents:
+        logger.warning("No latent representations collected")
+        return
+
+    # Combine all latent representations
+    combined_latents = torch.cat(all_latents, dim=0).numpy()
+    combined_labels = np.array(all_labels)
+    combined_dataset_ids = np.array(all_dataset_ids)
+    combined_dataset_names = np.array(all_dataset_names)
+
+    # Generate analysis plots
+    _generate_tsne_visualization(combined_latents, combined_labels, combined_dataset_ids,
+                                 combined_dataset_names, multi_loader, artifacts_dir)
+
+    _generate_latent_interpolation(agent, multi_loader, test_datasets, artifacts_dir)
+
+    _generate_latent_dimension_analysis(combined_latents, combined_dataset_ids,
+                                        combined_dataset_names, artifacts_dir)
+
+    logger.info("Latent space analysis completed")
+
+
+def _generate_tsne_visualization(latents, labels, dataset_ids, dataset_names, multi_loader, artifacts_dir):
+    """Generate t-SNE visualization of latent space"""
+    try:
+        from sklearn.manifold import TSNE
+        import seaborn as sns
+    except ImportError:
+        logger.warning("sklearn and seaborn required for t-SNE visualization")
+        return
+
+    logger.info("Generating t-SNE visualization...")
+
+    # Perform t-SNE
+    tsne = TSNE(n_components=2, random_state=42, perplexity=30)
+    latents_2d = tsne.fit_transform(latents)
+
+    # Create visualization
+    fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+
+    # Plot 1: Colored by dataset
+    unique_datasets = np.unique(dataset_names)
+    colors = plt.cm.Set1(np.linspace(0, 1, len(unique_datasets)))
+
+    for i, dataset_name in enumerate(unique_datasets):
+        mask = dataset_names == dataset_name
+        axes[0].scatter(latents_2d[mask, 0], latents_2d[mask, 1],
+                        c=[colors[i]], label=dataset_name, alpha=0.6, s=20)
+
+    axes[0].set_title('Latent Space by Dataset', fontsize=12, fontweight='bold')
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+
+    # Plot 2: Colored by class labels (for first dataset)
+    first_dataset = unique_datasets[0]
+    first_dataset_mask = dataset_names == first_dataset
+    first_dataset_latents = latents_2d[first_dataset_mask]
+    first_dataset_labels = labels[first_dataset_mask]
+
+    unique_labels = np.unique(first_dataset_labels)
+    label_colors = plt.cm.tab10(np.linspace(0, 1, len(unique_labels)))
+
+    for i, label in enumerate(unique_labels):
+        label_mask = first_dataset_labels == label
+        axes[1].scatter(first_dataset_latents[label_mask, 0],
+                        first_dataset_latents[label_mask, 1],
+                        c=[label_colors[i]], label=f'Class {int(label)}', alpha=0.6, s=20)
+
+    axes[1].set_title(f'Latent Space by Class ({first_dataset})', fontsize=12, fontweight='bold')
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+
+    plt.suptitle('t-SNE Visualization of Latent Space', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+
+    save_path = artifacts_dir / "latent_space_tsne_analysis"
+    plt.savefig(save_path.with_suffix(".png"), dpi=300, bbox_inches='tight')
+    plt.savefig(save_path.with_suffix(".pdf"), bbox_inches='tight')
+    plt.close()
+
+    logger.info(f"t-SNE visualization saved to {save_path}")
+
+
+def _generate_latent_interpolation(agent, multi_loader, test_datasets, artifacts_dir, n_steps: int = 8):
+    """Generate latent space interpolation between different samples"""
+    agent._model.eval()
+    device = agent._device
+
+    logger.info("Generating latent interpolation...")
+
+    from torch.utils.data import DataLoader
+    from core.data.hybrid_dataset import collate_conditioned_samples
+
+    # Get two random samples from the first dataset
+    dataset_name = list(test_datasets.keys())[0]
+    dataset_id = multi_loader.dataset_names.index(dataset_name)
+    test_dataset = test_datasets[dataset_name]
+
+    temp_loader = DataLoader(test_dataset, batch_size=2, shuffle=True,
+                             collate_fn=collate_conditioned_samples)
+    batch_data = next(iter(temp_loader))
+
+    images = batch_data['images'][:2].to(device)
+    with torch.no_grad():
+        with torch.no_grad():
+            # Prepare condition kwargs for first sample
+            limited_batch_data_1 = {
+                'images': batch_data['images'][0:1],
+                'dataset_ids': batch_data['dataset_ids'][0:1],
+                'dataset_names': [batch_data['dataset_names'][0]],
+                'label_types': [batch_data['label_types'][0]],
+                'single_mask': batch_data['single_mask'][0:1] if batch_data.get('single_mask') is not None else None,
+                'multi_mask': batch_data['multi_mask'][0:1] if batch_data.get('multi_mask') is not None else None,
+            }
+
+            # Handle labels for first sample
+            if limited_batch_data_1['single_mask'] is not None and limited_batch_data_1['single_mask'].any():
+                limited_batch_data_1['single_labels'] = batch_data['single_labels'][0:1] if batch_data.get(
+                    'single_labels') is not None else None
+            else:
+                limited_batch_data_1['single_labels'] = None
+
+            if limited_batch_data_1['multi_mask'] is not None and limited_batch_data_1['multi_mask'].any():
+                limited_batch_data_1['multi_labels'] = batch_data['multi_labels'][0:1] if batch_data.get(
+                    'multi_labels') is not None else None
+            else:
+                limited_batch_data_1['multi_labels'] = None
+
+            # Prepare condition kwargs for second sample
+            limited_batch_data_2 = {
+                'images': batch_data['images'][1:2],
+                'dataset_ids': batch_data['dataset_ids'][1:2],
+                'dataset_names': [batch_data['dataset_names'][1]],
+                'label_types': [batch_data['label_types'][1]],
+                'single_mask': batch_data['single_mask'][1:2] if batch_data.get('single_mask') is not None else None,
+                'multi_mask': batch_data['multi_mask'][1:2] if batch_data.get('multi_mask') is not None else None,
+            }
+
+            # Handle labels for second sample
+            if limited_batch_data_2['single_mask'] is not None and limited_batch_data_2['single_mask'].any():
+                # For second sample, we need to get the appropriate label from the single_labels tensor
+                single_count_first = limited_batch_data_1['single_mask'].sum().item() if limited_batch_data_1[
+                                                                                             'single_mask'] is not None else 0
+                if batch_data.get('single_labels') is not None and len(
+                        batch_data['single_labels']) > single_count_first:
+                    limited_batch_data_2['single_labels'] = batch_data['single_labels'][
+                                                            single_count_first:single_count_first + 1]
+                else:
+                    limited_batch_data_2['single_labels'] = None
+            else:
+                limited_batch_data_2['single_labels'] = None
+
+            if limited_batch_data_2['multi_mask'] is not None and limited_batch_data_2['multi_mask'].any():
+                multi_count_first = limited_batch_data_1['multi_mask'].sum().item() if limited_batch_data_1[
+                                                                                           'multi_mask'] is not None else 0
+                if batch_data.get('multi_labels') is not None and len(batch_data['multi_labels']) > multi_count_first:
+                    limited_batch_data_2['multi_labels'] = batch_data['multi_labels'][
+                                                           multi_count_first:multi_count_first + 1]
+                else:
+                    limited_batch_data_2['multi_labels'] = None
+            else:
+                limited_batch_data_2['multi_labels'] = None
+
+            # Get condition kwargs for both samples
+            condition_kwargs_1 = agent._prepare_condition_kwargs(limited_batch_data_1)
+            condition_kwargs_2 = agent._prepare_condition_kwargs(limited_batch_data_2)
+
+            # Encode to latent space
+            mu1, _ = agent._model.encode(images[0:1], **condition_kwargs_1)
+            mu2, _ = agent._model.encode(images[1:2], **condition_kwargs_2)
+
+            # Interpolate in latent space
+            interpolated_samples = []
+            alphas = torch.linspace(0, 1, n_steps)
+
+            for alpha in alphas:
+                # Linear interpolation
+                z_interp = (1 - alpha) * mu1 + alpha * mu2
+
+                # Decode interpolated latent (use condition from first sample)
+                sample = agent._model.decode(z_interp, **condition_kwargs_1)
+                interpolated_samples.append(sample)
+
+    # Create visualization
+    all_samples = [images[0:1]] + interpolated_samples + [images[1:2]]
+    combined_samples = torch.cat(all_samples, dim=0)
+
+    fig, axes = plt.subplots(1, len(all_samples), figsize=(2 * len(all_samples), 3))
+
+    for i, sample in enumerate(all_samples):
+        sample_np = sample[0].cpu().permute(1, 2, 0).numpy()
+        if sample_np.shape[2] == 1:
+            sample_np = sample_np.squeeze(2)
+            axes[i].imshow(sample_np, cmap='gray')
+        else:
+            axes[i].imshow(sample_np)
+
+        axes[i].axis('off')
+        if i == 0:
+            axes[i].set_title('Start', fontsize=10, fontweight='bold')
+        elif i == len(all_samples) - 1:
+            axes[i].set_title('End', fontsize=10, fontweight='bold')
+        else:
+            axes[i].set_title(f'α={alphas[i - 1]:.2f}', fontsize=9)
+
+    plt.suptitle(f'Latent Space Interpolation ({dataset_name})', fontsize=12, fontweight='bold')
+    plt.tight_layout()
+
+    save_path = artifacts_dir / "latent_interpolation_analysis"
+    plt.savefig(save_path.with_suffix(".png"), dpi=300, bbox_inches='tight')
+    plt.savefig(save_path.with_suffix(".pdf"), bbox_inches='tight')
+    plt.close()
+
+    logger.info(f"Latent interpolation saved to {save_path}")
+
+
+def _generate_latent_dimension_analysis(latents, dataset_ids, dataset_names, artifacts_dir):
+    """Analyze importance of different latent dimensions"""
+    logger.info("Generating latent dimension analysis...")
+
+    # Calculate variance for each dimension
+    latent_vars = np.var(latents, axis=0)
+
+    # Calculate mean latent values per dataset
+    unique_datasets = np.unique(dataset_names)
+    dataset_means = {}
+
+    for dataset_name in unique_datasets:
+        mask = dataset_names == dataset_name
+        dataset_means[dataset_name] = np.mean(latents[mask], axis=0)
+
+    # Create visualization
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+
+    # Plot 1: Latent dimension variance
+    dims = np.arange(len(latent_vars))
+    axes[0, 0].bar(dims, latent_vars)
+    axes[0, 0].set_title('Variance per Latent Dimension', fontweight='bold')
+    axes[0, 0].set_xlabel('Latent Dimension')
+    axes[0, 0].set_ylabel('Variance')
+    axes[0, 0].grid(True, alpha=0.3)
+
+    # Plot 2: Top 10 most variable dimensions
+    top_dims = np.argsort(latent_vars)[-10:]
+    axes[0, 1].bar(range(10), latent_vars[top_dims])
+    axes[0, 1].set_title('Top 10 Most Variable Dimensions', fontweight='bold')
+    axes[0, 1].set_xlabel('Dimension Rank')
+    axes[0, 1].set_ylabel('Variance')
+    axes[0, 1].set_xticks(range(10))
+    axes[0, 1].set_xticklabels([f'Dim {d}' for d in top_dims])
+    axes[0, 1].grid(True, alpha=0.3)
+
+    # Plot 3: Dataset separation in latent space (first few dimensions)
+    n_dims_show = min(8, latents.shape[1])
+    for i, dataset_name in enumerate(unique_datasets):
+        axes[1, 0].plot(dataset_means[dataset_name][:n_dims_show],
+                        label=dataset_name, marker='o', linewidth=2)
+
+    axes[1, 0].set_title('Dataset Separation in Latent Space', fontweight='bold')
+    axes[1, 0].set_xlabel('Latent Dimension')
+    axes[1, 0].set_ylabel('Mean Value')
+    axes[1, 0].legend()
+    axes[1, 0].grid(True, alpha=0.3)
+
+    # Plot 4: Cumulative variance explained
+    sorted_vars = np.sort(latent_vars)[::-1]
+    cumulative_var = np.cumsum(sorted_vars) / np.sum(sorted_vars)
+
+    axes[1, 1].plot(cumulative_var)
+    axes[1, 1].axhline(y=0.9, color='r', linestyle='--', label='90% Variance')
+    axes[1, 1].axhline(y=0.95, color='orange', linestyle='--', label='95% Variance')
+    axes[1, 1].set_title('Cumulative Variance Explained', fontweight='bold')
+    axes[1, 1].set_xlabel('Number of Dimensions')
+    axes[1, 1].set_ylabel('Cumulative Variance Ratio')
+    axes[1, 1].legend()
+    axes[1, 1].grid(True, alpha=0.3)
+
+    plt.suptitle('Latent Dimension Importance Analysis', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+
+    save_path = artifacts_dir / "latent_dimension_analysis"
+    plt.savefig(save_path.with_suffix(".png"), dpi=300, bbox_inches='tight')
+    plt.savefig(save_path.with_suffix(".pdf"), bbox_inches='tight')
+    plt.close()
+
+    logger.info(f"Latent dimension analysis saved to {save_path}")
